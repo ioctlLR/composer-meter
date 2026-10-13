@@ -10,13 +10,23 @@ $1.23 · TTL ends 11:19 AM
 - **Cache expiry** is the start of the last main-thread request (`turn.step`, no `agentId`) plus the TTL. It turns `warning` at 4 minutes left and `error` at 2, then becomes `cold ~$X.XX` in `error`: the estimated cost of re-writing the cache, i.e. the last request's input + cache read + cache write + output tokens × input price × write multiplier (1.25× for 5m, 2× for 1h).
 - Subagent requests use their own caches and don't reset the timer.
 
+On the terminal it draws differently (see below): a usage band above the prompt, and the directory and branch in the footer.
+
+```
+▰▰▰▱▱▱▱▱ 37% context   $1.23 session   Opus 5.5 · high   TTL ends 11:19 AM
+                                                                        focus & …   ~/src/app ⎇ main
+```
+
 ## Options
 
-`cacheTtl` (`userConfig`): `auto` (default), `5m` or `1h`. The engine doesn't expose the session's cache TTL, so `auto` assumes 1h when the API reports rate-limit windows (a subscription) and 5m otherwise. Stored in `~/.claude/settings.json` under `pluginConfigs["composer-meter"].options`.
+Set in `/config`, and stored in `~/.claude/settings.json` under `pluginConfigs["composer-meter@<source>"].options`: `composer-meter@inline` when loaded with `--plugin-dir`, `composer-meter@<marketplace>` when installed. A value saved there overrides the defaults below.
+
+- `cacheTtl`: `auto` (default), `5m` or `1h`. The engine doesn't expose the session's cache TTL, so `auto` assumes 1h when the API reports rate-limit windows (a subscription) and 5m otherwise.
+- `bandUsage` (terminal band): `cost` (default) shows the session's cost beside the context meter; `limits` shows the 5h and 7d plan meters in its place.
 
 ## Prices
 
-`INPUT_PRICES` in `hooks/register.tsx` holds list input prices per model as of 2026-10. The Models API (`GET /v1/models`) carries no pricing and needs credentials, so the table is maintained by hand. Fast mode and organisation-configured pricing aren't modelled.
+Claude Code's own price catalog is compiled into the binary (the `/model` picker's `$X/$Y per Mtok`) and reaches a mod only through `PostModelSwitch`'s `estimated_cache_write_usd`. After a switch the mod divides that back to the new model's base input price and prefers it (managed `modelPricing` included). Otherwise it falls back to `INPUT_PRICES` in `hooks/register.tsx`, list prices as of 2026-10, maintained by hand: the Models API (`GET /v1/models`) carries no pricing and needs credentials. The switch's `cache_ttl` is not used for the countdown. Fast mode and organisation-configured pricing aren't modelled.
 
 ## Where it draws, and what each surface allows
 
@@ -32,7 +42,13 @@ The mod hooks `ui.render` on `SessionMode`, the mode-label slot in the composer 
 
 The desktop renders `Svg` only in `AbovePrompt` and `Pane`.
 
-**Terminal (TUI).** Not built yet. `SessionMode` is raised on the terminal too (the dim labels at the right of the prompt footer), and `PromptHint` takes a `tail` string the terminal appends to its hint line. Check `.claude-plugin/types/claude-code/index.d.ts` for what each terminal site accepts.
+**Terminal (TUI).** Ported from `skins-plus`'s band and footer, without its Compact button.
+
+- `AbovePrompt`: one row of block meters (`▰▱`, eighths) for context fill (warning from 80%, error from 95%) and the session cost (or, under `bandUsage: limits`, a meter per plan limit in its place); then the main loop's model by name (`Opus 5.5`, derived from the id: the engine exposes only the id, and the `/config` model row only aliases) and effort, and the cache expiry piece above. Colors are skins-plus's Dracula (accent `#bd93f9`, text `#f8f8f2`, muted `#6272a4`), with a deepened variant on a light Claude Code theme. Another plugin's band, and a survey, keep their place. The desktop keeps the engine's band, since it shows its own context and model.
+- `SessionMode`: the engine's mode labels, then `~/path ⎇ branch` (or `detached <hash>`), read from `.git/HEAD` (worktrees and submodules followed) with no git process. The branch shows whole; the path gives way from its left, down to its last directory, within half the terminal's width. Refreshed at each turn's start and end, after main-thread `Bash` calls and on `CwdChanged`.
+- Effort is what `/config` holds until the next main-thread request reports what it really sent (`turn.step`'s `effort`), so a downgrade for the model shows.
+
+If `skins-plus` is also enabled, both draw a band; turn its band off with `/skin band off`.
 
 ## Development
 

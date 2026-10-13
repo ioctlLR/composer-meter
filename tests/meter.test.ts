@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { cachePiece, clock, coldWriteUsd, costPiece, inputPrice } from '../hooks/register'
+import { cachePiece, clock, coldWriteUsd, costPiece, enginePrice, inputPrice } from '../hooks/register'
 
 const MIN = 60_000
 const mark = { startedAt: 0, model: 'claude-opus-5-5', tokens: 200_000 }
@@ -37,4 +37,20 @@ test('session cost', () => {
   expect(costPiece({ usd: 1.234 })?.text).toBe('$1.23')
   expect(costPiece({ usd: 12.34 })?.text).toBe('$12.3')
   expect(costPiece(undefined)).toBe(null)
+})
+
+test("a model switch's estimate gives the engine's base price, its TTL divided out", () => {
+  const switched = { to_model: 'claude-opus-5-5[1m]', context_tokens: 200_000, estimated_cache_write_usd: 1, pricing: 'catalog' } as const
+  // $1 for 200K at 1.25x (5m) is $4/MTok; at 2x (1h) it is $2.50.
+  expect(enginePrice({ ...switched, cache_ttl: '5m' })).toEqual({ model: 'claude-opus-5-5[1m]', perMTok: 4, isLong: true })
+  expect(enginePrice({ ...switched, cache_ttl: '1h' })?.perMTok).toBe(2.5)
+  expect(enginePrice({ ...switched, cache_ttl: '5m', pricing: 'default' })).toBe(null)
+})
+
+test("the engine's price wins for its model and tier; the table covers the rest", () => {
+  const engine = { model: 'claude-opus-5-5[1m]', perMTok: 3, isLong: true }
+  expect(inputPrice('claude-opus-5-5', 200_000, engine)).toBe(3)
+  expect(inputPrice('claude-opus-5-5', 1_000, engine)).toBe(4)
+  expect(inputPrice('claude-sonnet-5-5', 200_000, engine)).toBe(2)
+  expect(cachePiece(mark, 5 * MIN, 5 * MIN, engine)?.text).toBe('cold ~$0.75')
 })

@@ -1,7 +1,7 @@
 {
   "name": "composer-meter",
   "version": "0.1.0",
-  "description": "Session cost and prompt-cache expiry in the composer footer",
+  "description": "Session cost and prompt-cache expiry in the composer footer; on the terminal, a usage band above the prompt and the directory and branch in the footer",
   "types": "./types/index.d.ts",
   "userConfig": {
     "cacheTtl": {
@@ -9,7 +9,21 @@
       "title": "Prompt-cache TTL",
       "description": "auto: 1h on a subscription, 5m on an API key.",
       "default": "auto",
-      "options": ["auto", "5m", "1h"]
+      "options": [
+        "auto",
+        "5m",
+        "1h"
+      ]
+    },
+    "bandUsage": {
+      "type": "string",
+      "title": "Band usage",
+      "description": "Terminal band: the session's cost so far beside the context meter (cost), or the 5h and 7d plan limits (limits).",
+      "default": "cost",
+      "options": [
+        "cost",
+        "limits"
+      ]
     }
   }
 }
