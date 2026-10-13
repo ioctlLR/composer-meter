@@ -1,0 +1,15 @@
+{
+  "name": "composer-meter",
+  "version": "0.1.0",
+  "description": "Session cost and prompt-cache expiry in the composer footer",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "cacheTtl": {
+      "type": "string",
+      "title": "Prompt-cache TTL",
+      "description": "auto: 1h on a subscription, 5m on an API key.",
+      "default": "auto",
+      "options": ["auto", "5m", "1h"]
+    }
+  }
+}
