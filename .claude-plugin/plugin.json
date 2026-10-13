@@ -2,6 +2,19 @@
   "name": "composer-meter",
   "version": "0.1.0",
   "description": "Session cost and prompt-cache expiry in the composer footer; on the terminal, a usage band above the prompt and the directory and branch in the footer",
+  "author": {
+    "name": "Andrew Ward"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/ioctlLR/composer-meter",
+  "keywords": [
+    "claude-code-mods",
+    "claude-mods",
+    "function-hooks",
+    "cost",
+    "prompt-cache",
+    "statusline"
+  ],
   "types": "./types/index.d.ts",
   "userConfig": {
     "cacheTtl": {

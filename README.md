@@ -10,6 +10,12 @@ $1.23 · TTL ends 11:19 AM
 - **Cache expiry** is the start of the last main-thread request (`turn.step`, no `agentId`) plus the TTL. It turns `warning` at 4 minutes left and `error` at 2, then becomes `cold ~$X.XX` in `error`: the estimated cost of re-writing the cache, i.e. the last request's input + cache read + cache write + output tokens × input price × write multiplier (1.25× for 5m, 2× for 1h).
 - Subagent requests use their own caches and don't reset the timer.
 
+## Install
+
+```
+/plugin install composer-meter --marketplace ioctlLR/composer-meter
+```
+
 On the terminal it draws differently (see below): a usage band above the prompt, and the directory and branch in the footer.
 
 ```
@@ -42,7 +48,7 @@ The mod hooks `ui.render` on `SessionMode`, the mode-label slot in the composer 
 
 The desktop renders `Svg` only in `AbovePrompt` and `Pane`.
 
-**Terminal (TUI).** Ported from `skins-plus`'s band and footer, without its Compact button.
+**Terminal (TUI).** Ported from skins-plus, my fork of [hellosverre's skins](https://github.com/hellosverre/claude-skins): its band and footer, without the Compact button.
 
 - `AbovePrompt`: one row of block meters (`▰▱`, eighths) for context fill (warning from 80%, error from 95%) and the session cost (or, under `bandUsage: limits`, a meter per plan limit in its place); then the main loop's model by name (`Opus 5.5`, derived from the id: the engine exposes only the id, and the `/config` model row only aliases) and effort, and the cache expiry piece above. Colors are skins-plus's Dracula (accent `#bd93f9`, text `#f8f8f2`, muted `#6272a4`), with a deepened variant on a light Claude Code theme. Another plugin's band, and a survey, keep their place. The desktop keeps the engine's band, since it shows its own context and model.
 - `SessionMode`: the engine's mode labels, then `~/path ⎇ branch` (or `detached <hash>`), read from `.git/HEAD` (worktrees and submodules followed) with no git process. The branch shows whole; the path gives way from its left, down to its last directory, within half the terminal's width. Refreshed at each turn's start and end, after main-thread `Bash` calls and on `CwdChanged`.
@@ -61,7 +67,7 @@ claude plugin test .
 ```
 
 ```bash
-claude --plugin-dir ~/src/composer-meter
+claude --plugin-dir .
 ```
 
 `tsc -p .` type-checks once the engine has loaded the mod and written `.claude-plugin/types/` (git-ignored).

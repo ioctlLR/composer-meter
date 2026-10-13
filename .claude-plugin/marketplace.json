@@ -1,0 +1,12 @@
+{
+  "name": "composer-meter",
+  "description": "Session cost, prompt-cache expiry and a usage band for Claude Code's composer.",
+  "owner": { "name": "Andrew Ward" },
+  "plugins": [
+    {
+      "name": "composer-meter",
+      "source": "./",
+      "description": "Session cost and prompt-cache expiry in the composer footer; on the terminal, a usage band above the prompt and the directory and branch in the footer."
+    }
+  ]
+}
