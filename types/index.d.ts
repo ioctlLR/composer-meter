@@ -33,6 +33,7 @@ declare module 'claude-code' {
       place: PlaceSnap
       price: EnginePrice | null
       isLight: boolean
+      seededFor: string | null
     }
   }
 }

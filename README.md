@@ -9,6 +9,7 @@ $1.23 · TTL ends 11:19 AM
 - **Cost** is `$.session.usage().cost`, refreshed after each prompt, tool call and model response (`session.measure`).
 - **Cache expiry** is the start of the last main-thread request (`turn.step`, no `agentId`) plus the TTL. It turns `warning` at 4 minutes left and `error` at 2, then becomes `cold ~$X.XX` in `error`: the estimated cost of re-writing the cache, i.e. the last request's input + cache read + cache write + output tokens × input price × write multiplier (1.25× for 5m, 2× for 1h).
 - Subagent requests use their own caches and don't reset the timer.
+- On `/resume`, `--resume`/`--continue`, a fork, or any reset of the mod's state with the timer empty (the desktop app letting an idle conversation's process go), the timer starts from the conversation's last main-thread request: the time its prompt or tool result was written to the transcript. The mod reads the transcript file for this, since `$.session.messages()` carries no timestamps; after a reset it finds the file by session id under `$CLAUDE_CONFIG_DIR` (or `~/.claude`)`/projects/`, once per session. A transcript over the 4 MiB a mod may read falls back to the engine's `seconds_since_last_response`, which is when the response finished, a little after the send.
 
 ## Install
 

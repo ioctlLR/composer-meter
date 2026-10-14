@@ -11,6 +11,7 @@ import type {
 import type { CacheMark, EnginePrice, ModelSnap, Piece, PlaceSnap, Tone, UsageSnap, View } from '../types'
 import { BAND_DARK, BAND_LIGHT, metersOf, modelName, usageSnap } from './band'
 import { fitPlace, gitDirOf, headLabel, homePath, parentOf, slashed } from './place'
+import { lastRequestIn } from './transcript'
 import { widthOf } from './width'
 
 const view = atom({ plugin: 'composer-meter', key: 'view' } as const, { cost: null, cache: null })
@@ -21,6 +22,9 @@ const model = atom({ plugin: 'composer-meter', key: 'model' } as const, { model:
 const place = atom({ plugin: 'composer-meter', key: 'place' } as const, { path: '', head: null } as PlaceSnap)
 const price = atom({ plugin: 'composer-meter', key: 'price' } as const, null as EnginePrice | null)
 const isLight = atom({ plugin: 'composer-meter', key: 'isLight' } as const, false)
+// The session whose transcript was last looked in for a cache mark; reset with the rest of
+// the state, so a reset session is looked up again.
+const seededFor = atom({ plugin: 'composer-meter', key: 'seededFor' } as const, null as string | null)
 
 const MINUTE = 60_000
 const WARN_MS = 4 * MINUTE
@@ -187,6 +191,64 @@ async function refreshPlace($: EngineInterface): Promise<void> {
   } catch {}
 }
 
+// A resumed or forked conversation's last request, from its transcript; past the 4 MiB a
+// mod may read, from the engine's report of its last response (a little later than the send).
+async function resumedMark(
+  $: EngineInterface,
+  e: { transcript_path?: string; model?: string; seconds_since_last_response?: number; context_tokens?: number },
+): Promise<CacheMark | null> {
+  const text = e.transcript_path ? await $.fs.read(e.transcript_path).catch(() => null) : null
+  const fromFile = text === null ? null : lastRequestIn(text)
+  if (fromFile) return fromFile
+
+  const seconds = e.seconds_since_last_response
+  const tokens = e.context_tokens
+  if (seconds === undefined || !tokens) return null
+  const model = e.model ?? (await $.session.model().catch(() => ''))
+  return { startedAt: (await $.clock.now()) - seconds * 1000, model, tokens }
+}
+
+const slug = (path: string) => path.replace(/[^a-zA-Z0-9]/g, '-')
+
+async function exists($: EngineInterface, path: string): Promise<boolean> {
+  return (await $.fs.stat(path).catch(() => null))?.kind === 'file'
+}
+
+// The session's transcript, <config dir>/projects/<its directory, slugged>/<id>.jsonl. A long
+// directory's slug is cut and hashed, so past the two guesses every project folder is tried.
+async function transcriptOf($: EngineInterface, id: string): Promise<string | null> {
+  const home = (await $.env.get('HOME').catch(() => null)) || (await $.env.get('USERPROFILE').catch(() => null))
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR').catch(() => null)) || (home ? `${slashed(home)}/.claude` : null)
+  if (!config) return null
+
+  const projects = `${slashed(config)}/projects`
+  const guesses = [await $.session.root().catch(() => null), await $.session.cwd().catch(() => null)]
+  for (const dir of new Set(guesses.filter((d): d is string => d !== null).map(slug))) {
+    if (await exists($, `${projects}/${dir}/${id}.jsonl`)) return `${projects}/${dir}/${id}.jsonl`
+  }
+  for (const entry of await $.fs.list(projects).catch(() => [])) {
+    if (entry.kind === 'dir' && (await exists($, `${projects}/${entry.name}/${id}.jsonl`))) {
+      return `${projects}/${entry.name}/${id}.jsonl`
+    }
+  }
+  return null
+}
+
+// A state reset (the desktop letting an idle session's process go, a reload) empties the
+// mark while the cost refreshes at once; the transcript says when the last request went out.
+// Looked up once per session id, and never over a mark a request set meanwhile.
+async function seedMark($: EngineInterface): Promise<void> {
+  if ((await read($, mark)) !== null) return
+  const id = await $.session.id().catch(() => null)
+  if (id === null || (await read($, seededFor)) === id) return
+  await update($, seededFor, () => id)
+
+  const path = await transcriptOf($, id)
+  const text = path === null ? null : await $.fs.read(path).catch(() => null)
+  const found = text === null ? null : lastRequestIn(text)
+  if (found) await update($, mark, prev => prev ?? found)
+}
+
 async function refreshAll($: EngineInterface): Promise<void> {
   await refreshMeter($)
   await refreshModel($)
@@ -196,6 +258,7 @@ async function refreshAll($: EngineInterface): Promise<void> {
 }
 
 async function refreshCache($: EngineInterface): Promise<void> {
+  await seedMark($).catch(() => {})
   const piece = cachePiece(await read($, mark), await ttlMs($), await $.clock.now(), await read($, price))
   await setView($, { cache: piece })
 }
@@ -212,9 +275,14 @@ export const register: Register = (on, options) => {
     return started
   })
 
-  // /clear, /resume and /branch reset $.state to its defaults and skip session.start.
+  // /clear, /resume and /branch reset $.state to its defaults and skip session.start. A
+  // resumed or forked conversation's cache runs from its last request.
   on('classic.SessionStart', { source: ['clear', 'resume', 'fork'] }, async ($, e, next) => {
     const result = await next(e)
+    if (e.source !== 'clear') {
+      const resumed = await resumedMark($, e).catch(() => null)
+      await update($, mark, () => resumed)
+    }
     await refreshAll($)
     return result
   })

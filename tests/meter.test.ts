@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { cachePiece, clock, coldWriteUsd, costPiece, enginePrice, inputPrice } from '../hooks/register'
+import { lastRequestIn } from '../hooks/transcript'
 
 const MIN = 60_000
 const mark = { startedAt: 0, model: 'claude-opus-5-5', tokens: 200_000 }
@@ -53,4 +54,22 @@ test("the engine's price wins for its model and tier; the table covers the rest"
   expect(inputPrice('claude-opus-5-5', 1_000, engine)).toBe(4)
   expect(inputPrice('claude-sonnet-5-5', 200_000, engine)).toBe(2)
   expect(cachePiece(mark, 5 * MIN, 5 * MIN, engine)?.text).toBe('cold ~$0.75')
+})
+
+test('a resumed transcript dates its cache from the last main-thread send', () => {
+  const line = (entry: object) => JSON.stringify(entry)
+  const usage = { input_tokens: 10, cache_read_input_tokens: 1000, cache_creation_input_tokens: 90, output_tokens: 50 }
+  const jsonl = [
+    line({ type: 'user', timestamp: '2026-10-13T23:00:00.000Z' }),
+    line({ type: 'assistant', timestamp: '2026-10-13T23:00:09.000Z', message: { model: 'claude-opus-5-5', usage } }),
+    line({ type: 'user', timestamp: '2026-10-13T23:05:00.000Z' }),
+    line({ type: 'user', isSidechain: true, timestamp: '2026-10-13T23:06:00.000Z' }),
+    line({ type: 'assistant', isSidechain: true, timestamp: '2026-10-13T23:06:30.000Z', message: { model: 'claude-haiku-5-5', usage } }),
+    line({ type: 'attachment', timestamp: '2026-10-13T23:07:00.000Z' }),
+    line({ type: 'assistant', timestamp: '2026-10-13T23:07:40.000Z', message: { model: 'claude-opus-5-5', usage } }),
+    line({ type: 'assistant', timestamp: '2026-10-13T23:08:00.000Z', message: { model: '<synthetic>', usage } }),
+    '{not json',
+  ].join('\n')
+  expect(lastRequestIn(jsonl)).toEqual({ startedAt: Date.parse('2026-10-13T23:05:00.000Z'), model: 'claude-opus-5-5', tokens: 1150 })
+  expect(lastRequestIn('')).toBe(null)
 })

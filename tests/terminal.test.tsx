@@ -3,6 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { metersOf, modelName } from '../hooks/band'
 import { fitPlace, gitDirOf, headLabel, homePath } from '../hooks/place'
+import { clock } from '../hooks/register'
 
 const STOCK: RenderElement = { type: 'Text', props: {}, children: ['stock row'] }
 
@@ -33,6 +34,8 @@ function stubEngine(on: On, cwd: string, tree: Tree) {
   mock.clock(on, { now: 10_000 })
   mock.env(on, { HOME: '/home/me' })
   on('session.cwd', () => ({ value: cwd }))
+  on('session.root', () => ({ value: cwd }))
+  on('session.id', () => ({ value: 'sess-1' }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('session.usage', () => ({
     value: {
@@ -51,6 +54,13 @@ function stubEngine(on: On, cwd: string, tree: Tree) {
   on('fs.stat', (_$, e) => {
     if (!(e.path in tree)) throw new Error(`ENOENT: ${e.path}`)
     return { value: { kind: tree[e.path] === null ? 'dir' : 'file', size: 0, mtimeMs: 0, isLink: false } }
+  })
+  on('fs.list', (_$, e) => {
+    const prefix = `${e.path ?? ''}/`
+    const names = Object.keys(tree)
+      .filter(path => path.startsWith(prefix) && !path.slice(prefix.length).includes('/'))
+      .map(path => ({ name: path.slice(prefix.length), kind: tree[path] === null ? 'dir' : 'file', size: 0, mtimeMs: 0, isLink: false }))
+    return { value: names as never }
   })
   on('fs.read', (_$, e) => {
     const text = tree[e.path]
@@ -168,4 +178,36 @@ test('a worktree reads its own HEAD', async ($, on) => {
 
   const footer = await $.ui.mount(FOOTER('terminal'))
   expect(await footer.find({ type: 'Text', text: '~/wt ⎇ detached 1a2b3c4' })).toBeDefined()
+})
+
+const TRANSCRIPT = [
+  { type: 'user', timestamp: new Date(5_000).toISOString() },
+  {
+    type: 'assistant',
+    timestamp: new Date(8_000).toISOString(),
+    message: { model: 'claude-opus-5-5', usage: { input_tokens: 10, cache_read_input_tokens: 1000, cache_creation_input_tokens: 0, output_tokens: 5 } },
+  },
+]
+  .map(entry => JSON.stringify(entry))
+  .join('\n')
+
+test('with the state reset, the cache timer is read back from the transcript', async ($, on) => {
+  stubEngine(on, '/home/me/src/app', { '/home/me/.claude/projects/-home-me-src-app/sess-1.jsonl': TRANSCRIPT })
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/home/me/src/app' })
+
+  // Plan limits mean a subscription: a 1h TTL from the send at 5s.
+  const footer = await $.ui.mount(FOOTER('desktop'))
+  expect(await footer.find({ type: 'Text', text: new RegExp(`TTL ends ${clock(5_000 + 3_600_000)}`) })).toBeDefined()
+})
+
+test('a slug cut short for a long directory is found by its session id', async ($, on) => {
+  stubEngine(on, '/home/me/src/app', {
+    '/home/me/.claude/projects': null,
+    '/home/me/.claude/projects/-home-me-src-a-1f2e3d': null,
+    '/home/me/.claude/projects/-home-me-src-a-1f2e3d/sess-1.jsonl': TRANSCRIPT,
+  })
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/home/me/src/app' })
+
+  const footer = await $.ui.mount(FOOTER('desktop'))
+  expect(await footer.find({ type: 'Text', text: /TTL ends/ })).toBeDefined()
 })
