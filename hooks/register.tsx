@@ -6,6 +6,7 @@ import type {
   SessionContextUsage,
   SessionCost,
   SessionRateLimit,
+  Timer,
 } from 'claude-code'
 
 import type { CacheMark, EnginePrice, ModelSnap, Piece, PlaceSnap, Tone, UsageSnap, View } from '../types'
@@ -22,9 +23,9 @@ const model = atom({ plugin: 'composer-meter', key: 'model' } as const, { model:
 const place = atom({ plugin: 'composer-meter', key: 'place' } as const, { path: '', head: null } as PlaceSnap)
 const price = atom({ plugin: 'composer-meter', key: 'price' } as const, null as EnginePrice | null)
 const isLight = atom({ plugin: 'composer-meter', key: 'isLight' } as const, false)
-// The session whose transcript was last looked in for a cache mark; reset with the rest of
-// the state, so a reset session is looked up again.
-const seededFor = atom({ plugin: 'composer-meter', key: 'seededFor' } as const, null as string | null)
+// The session the whole view was last refreshed for, its transcript looked in included;
+// reset with the rest of the state, so a reset or a new session id refreshes it all again.
+const refreshedFor = atom({ plugin: 'composer-meter', key: 'refreshedFor' } as const, null as string | null)
 
 const MINUTE = 60_000
 const WARN_MS = 4 * MINUTE
@@ -101,6 +102,13 @@ export function cachePiece(
   return { text: `TTL ends ${clock(expiresAt)}`, tone }
 }
 
+// The piece changes only at three times: 4m and 2m before expiry, and at it. The next one
+// still ahead of `now`, or null once the cache is cold.
+export function nextChangeAt(m: CacheMark, ttlMs: number, now: number): number | null {
+  const expiresAt = m.startedAt + ttlMs
+  return [expiresAt - WARN_MS, expiresAt - DANGER_MS, expiresAt].find(at => at > now) ?? null
+}
+
 const color = (tone: Tone) => (tone === 'normal' ? undefined : tone)
 
 const same = (a: View, b: View) => JSON.stringify(a) === JSON.stringify(b)
@@ -124,7 +132,10 @@ type Measured = { context: SessionContextUsage; rateLimits: readonly SessionRate
 
 async function showMeter($: EngineInterface, { context, rateLimits, cost }: Measured): Promise<void> {
   // Rate-limit windows are reported only on a subscription, which caches for 1h.
-  if (rateLimits.length > 0) await update($, isSubscription, () => true)
+  if (rateLimits.length > 0 && !(await read($, isSubscription))) {
+    await update($, isSubscription, () => true)
+    await refreshCache($)
+  }
   await setView($, { cost: costPiece(cost) })
   const snap = usageSnap(context, rateLimits)
   await update($, usage, prev => (JSON.stringify(prev) === JSON.stringify(snap) ? prev : snap))
@@ -191,13 +202,41 @@ async function refreshPlace($: EngineInterface): Promise<void> {
   } catch {}
 }
 
-// A resumed or forked conversation's last request, from its transcript; past the 4 MiB a
-// mod may read, from the engine's report of its last response (a little later than the send).
+// How much of a transcript's end `tail` hands over: under the 4 MiB a process's stdout carries.
+const TAIL_BYTES = 3 * 1024 * 1024
+
+// Windows has no `tail`. Windows PowerShell, there on every Windows, seeks to the same point
+// and copies the bytes out unchanged. The path comes in through the environment, so nothing
+// is quoted, and the file is opened shared for writing, since the engine holds it open.
+const WINDOWS_TAIL = [
+  "$ErrorActionPreference = 'Stop'",
+  "$f = [IO.File]::Open($env:COMPOSER_METER_TRANSCRIPT, 'Open', 'Read', 'ReadWrite')",
+  `try { [void]$f.Seek([Math]::Max(0, $f.Length - ${TAIL_BYTES}), 'Begin'); $o = [Console]::OpenStandardOutput(); $f.CopyTo($o); $o.Flush() } finally { $f.Close() }`,
+].join('; ')
+
+const tailOf = async ($: EngineInterface, path: string) =>
+  (await $.env.get('OS').catch(() => undefined)) === 'Windows_NT'
+    ? $.process.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_TAIL], {
+        env: { COMPOSER_METER_TRANSCRIPT: path },
+      })
+    : $.process.run(['tail', '-c', String(TAIL_BYTES), path])
+
+// The transcript's last 3 MiB, whatever its size: the last request is at the end, and the
+// line the cut lands in does not parse and is skipped. Where no process runs (a managed
+// plugin denies it), `$.fs.read`, which takes up to 4 MiB.
+async function readTranscript($: EngineInterface, path: string): Promise<string | null> {
+  const tail = await tailOf($, path).catch(() => null)
+  if (tail !== null && tail.exitCode === 0) return tail.stdout
+  return $.fs.read(path).catch(() => null)
+}
+
+// A resumed or forked conversation's last request, from its transcript; where that cannot be
+// read, from the engine's report of its last response (a little later than the send).
 async function resumedMark(
   $: EngineInterface,
   e: { transcript_path?: string; model?: string; seconds_since_last_response?: number; context_tokens?: number },
 ): Promise<CacheMark | null> {
-  const text = e.transcript_path ? await $.fs.read(e.transcript_path).catch(() => null) : null
+  const text = e.transcript_path ? await readTranscript($, e.transcript_path) : null
   const fromFile = text === null ? null : lastRequestIn(text)
   if (fromFile) return fromFile
 
@@ -236,20 +275,32 @@ async function transcriptOf($: EngineInterface, id: string): Promise<string | nu
 
 // A state reset (the desktop letting an idle session's process go, a reload) empties the
 // mark while the cost refreshes at once; the transcript says when the last request went out.
-// Looked up once per session id, and never over a mark a request set meanwhile.
-async function seedMark($: EngineInterface): Promise<void> {
+// Never over a mark a request set meanwhile.
+async function seedMark($: EngineInterface, id: string): Promise<void> {
   if ((await read($, mark)) !== null) return
-  const id = await $.session.id().catch(() => null)
-  if (id === null || (await read($, seededFor)) === id) return
-  await update($, seededFor, () => id)
-
   const path = await transcriptOf($, id)
-  const text = path === null ? null : await $.fs.read(path).catch(() => null)
+  const text = path === null ? null : await readTranscript($, path)
   const found = text === null ? null : lastRequestIn(text)
   if (found) await update($, mark, prev => prev ?? found)
 }
 
-async function refreshAll($: EngineInterface): Promise<void> {
+let refreshing: Promise<void> | null = null
+
+// A start and a drawing beside it can both ask before either records the session: one run
+// serves both, so the transcript is read once.
+function refreshAll($: EngineInterface): Promise<void> {
+  refreshing ??= refreshEverything($).finally(() => {
+    refreshing = null
+  })
+  return refreshing
+}
+
+async function refreshEverything($: EngineInterface): Promise<void> {
+  const id = await $.session.id().catch(() => null)
+  if (id !== null) {
+    await update($, refreshedFor, () => id)
+    await seedMark($, id).catch(() => {})
+  }
   await refreshMeter($)
   await refreshModel($)
   await refreshPlace($)
@@ -257,10 +308,48 @@ async function refreshAll($: EngineInterface): Promise<void> {
   await refreshCache($)
 }
 
+let changeTimer: Timer | null = null
+
+// Draws the cache piece, and sets a timer for its next change; a new mark, TTL or price
+// draws it again and moves the timer.
 async function refreshCache($: EngineInterface): Promise<void> {
-  await seedMark($).catch(() => {})
-  const piece = cachePiece(await read($, mark), await ttlMs($), await $.clock.now(), await read($, price))
-  await setView($, { cache: piece })
+  const m = await read($, mark)
+  const ttl = await ttlMs($)
+  const now = await $.clock.now()
+  await setView($, { cache: cachePiece(m, ttl, now, await read($, price)) })
+
+  changeTimer?.cancel()
+  const at = m === null ? null : nextChangeAt(m, ttl, now)
+  changeTimer = at === null ? null : $.clock.after(at - now, () => void refreshCache($).catch(() => {}))
+}
+
+// /clear, /resume and /branch reset the state without a session.start, and the
+// classic.SessionStart that reports them may not reach a user plugin (a managed one above
+// can end its chain). A session id the view was not refreshed for says one happened.
+async function catchReset($: EngineInterface): Promise<void> {
+  const id = await $.session.id().catch(() => null)
+  if (id !== null && (await read($, refreshedFor)) !== id) await refreshAll($)
+}
+
+// From a drawing: a check started straight from one did not finish under test, so a timer
+// starts it.
+function laterCatchReset($: EngineInterface): void {
+  $.clock.after(0, () => void catchReset($).catch(() => {}))
+}
+
+const END_RETRY_MS = 250
+const END_TRIES = 20
+
+// After a /clear or a resume ends `ended`, watches for the session that takes its place:
+// four times a second, for five seconds at most.
+function afterEnd($: EngineInterface, ended: string, tries = END_TRIES): void {
+  $.clock.after(END_RETRY_MS, () => {
+    void (async () => {
+      const id = await $.session.id().catch(() => null)
+      if (id !== null && id !== ended) await catchReset($)
+      else if (tries > 1) afterEnd($, ended, tries - 1)
+    })().catch(() => {})
+  })
 }
 
 export const register: Register = (on, options) => {
@@ -271,12 +360,13 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await refreshAll($)
-    $.clock.every(1000, () => void refreshCache($))
     return started
   })
 
-  // /clear, /resume and /branch reset $.state to its defaults and skip session.start. A
-  // resumed or forked conversation's cache runs from its last request.
+  // Where it arrives, refreshes at once after a reset, and dates a resumed or forked
+  // conversation's cache from its last request: from the engine's report of its last
+  // response when the transcript cannot be read. Without it, session.end and the next
+  // drawing catch the reset (catchReset).
   on('classic.SessionStart', { source: ['clear', 'resume', 'fork'] }, async ($, e, next) => {
     const result = await next(e)
     if (e.source !== 'clear') {
@@ -336,7 +426,10 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     await refreshModel($)
     const learned = enginePrice(e)
-    if (learned) await update($, price, () => learned)
+    if (learned) {
+      await update($, price, () => learned)
+      await refreshCache($)
+    }
     return result
   })
 
@@ -367,14 +460,16 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear') {
       await update($, mark, () => null)
-      await setView($, { cache: null })
+      await refreshCache($)
     }
+    if (e.reason === 'clear' || e.reason === 'resume') afterEnd($, e.sessionId)
     return next(e)
   })
 
   // Terminal: the band above the prompt holds the meters, model and effort, and cache expiry.
   // The desktop draws its own context and model, so it keeps the engine's band.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    laterCatchReset($)
     if (e.surface !== 'terminal' || e.props.hasSurvey) return next(e)
 
     const { cost, cache } = await read($, view)
@@ -418,7 +513,10 @@ export const register: Register = (on, options) => {
     )
   })
 
+  // A reset redraws what read the state, so a drawing also looks for one; the refresh it
+  // starts draws again when done.
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    laterCatchReset($)
     if (e.surface === 'terminal') {
       // The footer's right: the engine's mode labels, then the directory and branch. The
       // branch shows whole; the path gives way from its left, within half the width.

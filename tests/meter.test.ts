@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { cachePiece, clock, coldWriteUsd, costPiece, enginePrice, inputPrice } from '../hooks/register'
+import { cachePiece, clock, coldWriteUsd, costPiece, enginePrice, inputPrice, nextChangeAt } from '../hooks/register'
 import { lastRequestIn } from '../hooks/transcript'
 
 const MIN = 60_000
@@ -72,4 +72,12 @@ test('a resumed transcript dates its cache from the last main-thread send', () =
   ].join('\n')
   expect(lastRequestIn(jsonl)).toEqual({ startedAt: Date.parse('2026-10-13T23:05:00.000Z'), model: 'claude-opus-5-5', tokens: 1150 })
   expect(lastRequestIn('')).toBe(null)
+})
+
+test('the cache piece next changes at 4m left, 2m left and expiry, then never', () => {
+  const m = { startedAt: 0, model: 'claude-opus-5-5', tokens: 1000 }
+  expect(nextChangeAt(m, 5 * MIN, 0)).toBe(1 * MIN)
+  expect(nextChangeAt(m, 5 * MIN, 1 * MIN)).toBe(3 * MIN)
+  expect(nextChangeAt(m, 5 * MIN, 4 * MIN)).toBe(5 * MIN)
+  expect(nextChangeAt(m, 5 * MIN, 5 * MIN)).toBeNull()
 })

@@ -30,13 +30,26 @@ const BAND = (surface: 'terminal' | 'desktop') =>
 // A file tree by path: a string is a file's text, null a directory.
 type Tree = Record<string, string | null>
 
-function stubEngine(on: On, cwd: string, tree: Tree) {
-  mock.clock(on, { now: 10_000 })
-  mock.env(on, { HOME: '/home/me' })
+// The session's id and model, read at each call: a test moves them to stand for a resume.
+type Who = { id: string; model: string }
+
+// `tails` are the files `tail -c`, or PowerShell where `env` says Windows, reads; without
+// one, it fails as where no process runs.
+function stubEngine(
+  on: On,
+  cwd: string,
+  tree: Tree,
+  who: Who = { id: 'sess-1', model: 'claude-opus-5-5' },
+  tails: Record<string, string> = {},
+  spawned: string[][] = [],
+  env: Record<string, string> = {},
+) {
+  const clock = mock.clock(on, { now: 10_000 })
+  mock.env(on, { HOME: '/home/me', ...env })
   on('session.cwd', () => ({ value: cwd }))
   on('session.root', () => ({ value: cwd }))
-  on('session.id', () => ({ value: 'sess-1' }))
-  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  on('session.id', () => ({ value: who.id }))
+  on('session.model', () => ({ value: who.model }))
   on('session.usage', () => ({
     value: {
       startedAt: 0,
@@ -51,7 +64,15 @@ function stubEngine(on: On, cwd: string, tree: Tree) {
   on('config.list', () => ({ value: [{ key: 'effortLevel', label: 'Effort', value: 'high' }] as never }))
   on('session.start', () => ({ cwd }))
   on('ui.render', () => STOCK)
+  on('process.run', (_$, e) => {
+    spawned.push([...e.argv])
+    const [cmd, flag, , arg] = e.argv
+    const path = cmd === 'powershell.exe' ? e.init?.env?.COMPOSER_METER_TRANSCRIPT : cmd === 'tail' && flag === '-c' ? arg : undefined
+    if (path === undefined || !(path in tails)) throw new Error('not found')
+    return { value: { exitCode: 0, stdout: tails[path]!, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('fs.stat', (_$, e) => {
+    if (e.path in tails) return { value: { kind: 'file', size: 5 * 1024 * 1024, mtimeMs: 0, isLink: false } }
     if (!(e.path in tree)) throw new Error(`ENOENT: ${e.path}`)
     return { value: { kind: tree[e.path] === null ? 'dir' : 'file', size: 0, mtimeMs: 0, isLink: false } }
   })
@@ -67,6 +88,7 @@ function stubEngine(on: On, cwd: string, tree: Tree) {
     if (typeof text !== 'string') throw new Error(`ENOENT: ${e.path}`)
     return { value: text }
   })
+  return clock
 }
 
 const REPO: Tree = {
@@ -210,4 +232,89 @@ test('a slug cut short for a long directory is found by its session id', async (
 
   const footer = await $.ui.mount(FOOTER('desktop'))
   expect(await footer.find({ type: 'Text', text: /TTL ends/ })).toBeDefined()
+})
+
+const ENDED = { reason: 'resume', sessionId: 'sess-1', resume: {} } as never
+
+test('a resume with no SessionStart reaching the mod is caught after session.end', async ($, on) => {
+  const who = { id: 'sess-1', model: 'claude-opus-5-5' }
+  const time = stubEngine(on, '/home/me/src/app', { '/home/me/.claude/projects/-home-me-src-app/sess-2.jsonl': TRANSCRIPT }, who)
+  on('session.end', () => ({ sessionId: 'sess-1' }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/home/me/src/app' })
+  const band = await $.ui.mount(BAND('terminal'))
+  await time.settle()
+
+  // The new session shows up a little after the end, as the engine swaps it in.
+  await $.session.end(ENDED)
+  await time.advance(250)
+  Object.assign(who, { id: 'sess-2', model: 'claude-fable-5-1' })
+  expect(await band.find({ type: 'Text', text: 'Fable 5.1' })).toBeUndefined()
+  await time.advance(250)
+
+  expect(await band.find({ type: 'Text', text: 'Fable 5.1' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: `TTL ends ${clock(5_000 + 3_600_000)}` })).toBeDefined()
+})
+
+test('a drawing under a session it was not refreshed for refreshes it all', async ($, on) => {
+  const who = { id: 'sess-1', model: 'claude-opus-5-5' }
+  const time = stubEngine(on, '/home/me/src/app', { '/home/me/.claude/projects/-home-me-src-app/sess-2.jsonl': TRANSCRIPT }, who)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/home/me/src/app' })
+
+  Object.assign(who, { id: 'sess-2', model: 'claude-fable-5-1' })
+  const band = await $.ui.mount(BAND('terminal'))
+  await time.settle()
+
+  expect(await band.find({ type: 'Text', text: 'Fable 5.1' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: `TTL ends ${clock(5_000 + 3_600_000)}` })).toBeDefined()
+})
+
+test('a transcript is read from its end with tail, whatever its size', async ($, on) => {
+  // The cut-off line tail starts on does not parse and is skipped.
+  const path = '/home/me/.claude/projects/-home-me-src-app/sess-1.jsonl'
+  stubEngine(on, '/home/me/src/app', {}, undefined, { [path]: `ype":"user"}\n${TRANSCRIPT}` })
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/home/me/src/app' })
+
+  const footer = await $.ui.mount(FOOTER('desktop'))
+  expect(await footer.find({ type: 'Text', text: new RegExp(`TTL ends ${clock(5_000 + 3_600_000)}`) })).toBeDefined()
+})
+
+test('the cache piece changes tone on time, with no tick between', async ($, on) => {
+  const time = stubEngine(on, '/home/me/src/app', { '/home/me/.claude/projects/-home-me-src-app/sess-1.jsonl': TRANSCRIPT })
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/home/me/src/app' })
+  const footer = await $.ui.mount(FOOTER('desktop'))
+  const expiresAt = 5_000 + 3_600_000
+  const piece = () => footer.find({ type: 'Text', text: /TTL ends|cold/ })
+
+  expect((await piece())?.props.color).toBeUndefined()
+  await time.set(expiresAt - 4 * 60_000)
+  expect((await piece())?.props.color).toBe('warning')
+  await time.set(expiresAt - 2 * 60_000)
+  expect((await piece())?.props.color).toBe('error')
+  await time.set(expiresAt)
+  expect(await footer.find({ type: 'Text', text: /cold ~\$/ })).toBeDefined()
+})
+
+
+test('a start reads the transcript once, the drawings beside it included', async ($, on) => {
+  const path = '/home/me/.claude/projects/-home-me-src-app/sess-1.jsonl'
+  const spawned: string[][] = []
+  const time = stubEngine(on, '/home/me/src/app', {}, undefined, { [path]: TRANSCRIPT }, spawned)
+  const footer = $.ui.mount(FOOTER('desktop'))
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/home/me/src/app' })
+  await footer
+  await $.ui.mount(BAND('terminal'))
+  await time.settle()
+
+  expect(spawned.filter(argv => argv[0] === 'tail')).toHaveLength(1)
+})
+
+test('on Windows, PowerShell reads the end in place of tail', async ($, on) => {
+  const path = '/home/me/.claude/projects/-home-me-src-app/sess-1.jsonl'
+  const spawned: string[][] = []
+  stubEngine(on, '/home/me/src/app', {}, undefined, { [path]: `ype":"user"}\n${TRANSCRIPT}` }, spawned, { OS: 'Windows_NT' })
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/home/me/src/app' })
+
+  const footer = await $.ui.mount(FOOTER('desktop'))
+  expect(await footer.find({ type: 'Text', text: new RegExp(`TTL ends ${clock(5_000 + 3_600_000)}`) })).toBeDefined()
+  expect(spawned.map(argv => argv[0])).toEqual(['powershell.exe'])
 })
